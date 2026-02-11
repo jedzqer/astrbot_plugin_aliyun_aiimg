@@ -229,7 +229,7 @@ class AliyunQwenImage(Star):
         # 构建请求参数
         try:
             # wan2.6 模型使用新的 ImageGeneration API
-            if self.model == "wan2.6-t2i":
+            if self.model.startswith("wan2.6"):
                 if not HAS_IMAGE_GENERATION:
                     raise Exception("wan2.6-t2i 模型需要 DashScope SDK >= 1.25.7，请升级: pip install --upgrade dashscope")
                 
@@ -241,17 +241,26 @@ class AliyunQwenImage(Star):
                     content=[{"text": prompt}]
                 )
                 
+                # 构建参数字典
+                parameters = {
+                    "n": 1,
+                    "size": target_size
+                }
+                
+                if self.negative_prompt and self.negative_prompt.strip():
+                    parameters["negative_prompt"] = self.negative_prompt
+                if self.prompt_extend is not None:
+                    parameters["prompt_extend"] = self.prompt_extend
+                if self.watermark is not None:
+                    parameters["watermark"] = self.watermark
+                
                 # 调用新版 API
                 response = await asyncio.to_thread(
                     ImageGeneration.call,
                     model=self.model,
                     api_key=api_key,
                     messages=[message],
-                    negative_prompt=self.negative_prompt if self.negative_prompt and self.negative_prompt.strip() else "",
-                    prompt_extend=self.prompt_extend,
-                    watermark=self.watermark,
-                    n=1,
-                    size=target_size
+                    parameters=parameters
                 )
                 
                 logger.info(f"[_generate_image] API 调用完成，状态码: {response.status_code}")
