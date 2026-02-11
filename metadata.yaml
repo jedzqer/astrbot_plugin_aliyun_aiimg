@@ -1,5 +1,5 @@
 name: astrbot_plugin_aliyun_qwen_aiimg
-desc: 接入阿里云通义千问图像生成模型，可以使用 aiimg 生成图片或通过自然语言让 LLM 生成，让bot自拍给你看。
+desc: 接入阿里云通义千问图像生成模型，可以使用 qwenimg 生成图片或通过自然语言让 LLM 生成，让bot自拍给你看。
 version: v2.0.0
 author: 木有知，jedzqer
 repo: https://github.com/muyouzhi6/astrbot_plugin_aliyun_qwen_aiimg

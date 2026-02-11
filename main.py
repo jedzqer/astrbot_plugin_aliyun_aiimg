@@ -26,8 +26,8 @@ from astrbot.api.star import Context, Star, StarTools, register
 # 配置常量
 DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_MODEL = "qwen-image-plus"
-DEFAULT_SIZE = "1024*1024"
-DEFAULT_NEGATIVE_PROMPT = " "
+DEFAULT_SIZE = "1664*928"  # qwen-image 系列默认 16:9，万相系列默认 1024*1024
+DEFAULT_NEGATIVE_PROMPT = ""  # 空字符串表示不使用反向提示词
 
 # 防抖和清理配置
 DEBOUNCE_SECONDS = 10.0
@@ -211,23 +211,36 @@ class AliyunQwenImage(Star):
 
     async def _generate_image(self, prompt: str, size: str = "") -> str:
         """调用 Aliyun Qwen API 生成图片，返回本地文件路径"""
+        logger.info(f"[_generate_image] 开始生成图片，prompt: {prompt}, size: {size}")
+        
         api_key = self._get_api_key()
         target_size = size if size else self.default_size
+        
+        logger.info(f"[_generate_image] 使用模型: {self.model}, 尺寸: {target_size}")
 
         # 构建请求参数
         try:
+            # 构建参数字典，只传入有效参数
+            params = {
+                "api_key": api_key,
+                "model": self.model,
+                "prompt": prompt,
+                "n": 1,
+                "size": target_size,
+                "prompt_extend": self.prompt_extend,
+                "watermark": self.watermark
+            }
+            
+            # 只有在 negative_prompt 不为空时才传入
+            if self.negative_prompt and self.negative_prompt.strip():
+                params["negative_prompt"] = self.negative_prompt
+            
             # 使用 DashScope SDK 调用
             response = await asyncio.to_thread(
                 ImageSynthesis.call,
-                api_key=api_key,
-                model=self.model,
-                prompt=prompt,
-                negative_prompt=self.negative_prompt,
-                n=1,
-                size=target_size,
-                prompt_extend=self.prompt_extend,
-                watermark=self.watermark
+                **params
             )
+            logger.info(f"[_generate_image] API 调用完成，状态码: {response.status_code}")
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "InvalidApiKey" in error_msg:
@@ -300,6 +313,8 @@ class AliyunQwenImage(Star):
         示例: /qwenimg 一个女孩 9:16
         支持比例: 1:1, 4:3, 3:4, 16:9, 9:16
         """
+        logger.info(f"[qwenimg] 收到指令，prompt: {prompt}")
+        
         if not prompt:
             yield event.plain_result("请提供提示词！使用方法：/qwenimg <提示词> [比例]")
             return
