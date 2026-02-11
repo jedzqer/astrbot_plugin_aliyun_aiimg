@@ -216,7 +216,7 @@ class AliyunQwenImage(Star):
         api_key = self._get_api_key()
         target_size = size if size else self.default_size
         
-        logger.info(f"[_generate_image] 使用模型: {self.model}, 尺寸: {target_size}")
+        logger.info(f"[_generate_image] 使用模型: {self.model}, 尺寸: {target_size}, base_url: {self.base_url}")
 
         # 构建请求参数
         try:
@@ -226,14 +226,19 @@ class AliyunQwenImage(Star):
                 "model": self.model,
                 "prompt": prompt,
                 "n": 1,
-                "size": target_size,
-                "prompt_extend": self.prompt_extend,
-                "watermark": self.watermark
+                "size": target_size
             }
             
-            # 只有在 negative_prompt 不为空时才传入
-            if self.negative_prompt and self.negative_prompt.strip():
-                params["negative_prompt"] = self.negative_prompt
+            # 根据模型类型设置参数
+            # 万相模型不支持 prompt_extend 和 watermark 参数
+            if self.model.startswith("qwen-image"):
+                params["prompt_extend"] = self.prompt_extend
+                params["watermark"] = self.watermark
+                # 只有在 negative_prompt 不为空时才传入
+                if self.negative_prompt and self.negative_prompt.strip():
+                    params["negative_prompt"] = self.negative_prompt
+            
+            logger.info(f"[_generate_image] 调用参数: {params}")
             
             # 使用 DashScope SDK 调用
             response = await asyncio.to_thread(
