@@ -2,38 +2,44 @@
     "base_url": {
         "description": "API Base URL",
         "type": "string",
-        "default": "https://ai.gitee.com/v1",
-        "hint": "Gitee AI API 地址"
+        "default": "https://dashscope.aliyuncs.com/api/v1",
+        "hint": "阿里云百炼 API 地址，北京地域使用默认值，新加坡地域使用 https://dashscope-intl.aliyuncs.com/api/v1"
     },
     "api_key": {
         "description": "API 密钥 (支持多 Key 轮询)",
         "type": "list",
-        "hint": "Gitee AI API Key，支持配置多个 Key 以实现轮询调用",
+        "hint": "阿里云百炼 API Key，支持配置多个 Key 以实现轮询调用。获取方法：https://help.aliyun.com/zh/model-studio/get-api-key",
         "default": [],
         "obvious_hint": true
     },
     "model": {
         "description": "使用的模型名称",
         "type": "string",
-        "default": "z-image-turbo",
-        "hint": "例如: z-image-turbo"
+        "default": "qwen-image-plus",
+        "hint": "千问系列: qwen-image-max, qwen-image-plus, qwen-image；万相系列: wan2.6-t2i, wan2.5-t2i-preview, wan2.2-t2i-flash, wanx2.0-t2i-turbo"
     },
     "size": {
         "description": "图片大小",
         "type": "string",
-        "default": "1024x1024",
-        "hint": "例如: 1024x1024"
-    },
-    "num_inference_steps": {
-        "description": "推理步数",
-        "type": "int",
-        "default": 9,
-        "hint": "推理步数，默认 9"
+        "default": "1024*1024",
+        "hint": "千问系列支持: 1664*928(16:9), 928*1664(9:16), 1328*1328(1:1), 1472*1104(4:3), 1104*1472(3:4)；万相系列支持 512-1440 范围内任意组合"
     },
     "negative_prompt": {
         "description": "负面提示词",
         "type": "string",
-        "default": "",
-        "hint": "用于指定不希望出现在生成图片中的内容"
+        "default": " ",
+        "hint": "用于指定不希望出现在生成图片中的内容，留空或单个空格表示不使用"
+    },
+    "prompt_extend": {
+        "description": "开启 Prompt 智能改写",
+        "type": "bool",
+        "default": true,
+        "hint": "自动优化提示词，提升出图效果，会增加 3-5 秒耗时"
+    },
+    "watermark": {
+        "description": "添加水印",
+        "type": "bool",
+        "default": false,
+        "hint": "是否在图像右下角添加 'Qwen-Image' 水印"
     }
 }

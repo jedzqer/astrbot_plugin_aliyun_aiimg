@@ -1,18 +1,21 @@
-"""AstrBot Gitee AI 图像生成插件
+"""AstrBot Aliyun Qwen 图像生成插件
 
 支持 LLM 工具调用和 /aiimg 命令调用，支持多种图片比例和多 Key 轮询。
 """
 
 import asyncio
-import base64
 import os
 import time
 from pathlib import Path
 from typing import Optional
+from http import HTTPStatus
+from urllib.parse import urlparse, unquote
+from pathlib import PurePosixPath
 
 import aiofiles
 import aiohttp
-from openai import AsyncOpenAI
+from dashscope import ImageSynthesis
+import dashscope
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -21,15 +24,10 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 
 # 配置常量
-DEFAULT_BASE_URL = "https://ai.gitee.com/v1"
-DEFAULT_MODEL = "z-image-turbo"
-DEFAULT_SIZE = "1024x1024"
-DEFAULT_INFERENCE_STEPS = 9
-DEFAULT_NEGATIVE_PROMPT = (
-    "low quality, bad anatomy, bad hands, text, error, missing fingers, "
-    "extra digit, fewer digits, cropped, worst quality, normal quality, "
-    "jpeg artifacts, signature, watermark, username, blurry"
-)
+DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
+DEFAULT_MODEL = "qwen-image-plus"
+DEFAULT_SIZE = "1024*1024"
+DEFAULT_NEGATIVE_PROMPT = " "
 
 # 防抖和清理配置
 DEBOUNCE_SECONDS = 10.0
@@ -39,23 +37,31 @@ CLEANUP_INTERVAL = 10  # 每 N 次生成执行一次清理
 
 
 @register(
-    "astrbot_plugin_gitee_aiimg",
-    "木有知",
-    "接入 Gitee AI 图像生成模型。支持 LLM 调用和命令调用，支持多种比例。",
-    "1.2",
+    "astrbot_plugin_aliyun_qwen_aiimg",
+    "木有知，jedzqer",
+    "接入 Aliyun Qwen 图像生成模型。支持 LLM 调用和命令调用，支持多种比例。",
+    "2.0",
 )
-class GiteeAIImage(Star):
-    """Gitee AI 图像生成插件"""
+class AliyunQwenImage(Star):
+    """Aliyun Qwen 图像生成插件"""
 
-    # Gitee AI 支持的图片比例
-    SUPPORTED_RATIOS: dict[str, list[str]] = {
-        "1:1": ["256x256", "512x512", "1024x1024", "2048x2048"],
-        "4:3": ["1152x896", "2048x1536"],
-        "3:4": ["768x1024", "1536x2048"],
-        "3:2": ["2048x1360"],
-        "2:3": ["1360x2048"],
-        "16:9": ["1024x576", "2048x1152"],
-        "9:16": ["576x1024", "1152x2048"],
+    # Aliyun Qwen 支持的图片比例
+    # qwen-image系列支持的固定尺寸
+    QWEN_IMAGE_SIZES: dict[str, list[str]] = {
+        "16:9": ["1664*928"],
+        "9:16": ["928*1664"],
+        "1:1": ["1328*1328"],
+        "4:3": ["1472*1104"],
+        "3:4": ["1104*1472"],
+    }
+    
+    # wan系列支持的常用尺寸（支持512-1440范围内任意组合）
+    WAN_IMAGE_SIZES: dict[str, list[str]] = {
+        "1:1": ["1024*1024"],
+        "16:9": ["1440*810"],
+        "9:16": ["810*1440"],
+        "4:3": ["1440*1080"],
+        "3:4": ["1080*1440"],
     }
 
     def __init__(self, context: Context, config: dict):
@@ -70,15 +76,15 @@ class GiteeAIImage(Star):
         # 模型配置
         self.model = config.get("model", DEFAULT_MODEL)
         self.default_size = config.get("size", DEFAULT_SIZE)
-        self.num_inference_steps = config.get("num_inference_steps", DEFAULT_INFERENCE_STEPS)
         self.negative_prompt = config.get("negative_prompt", DEFAULT_NEGATIVE_PROMPT)
+        self.prompt_extend = config.get("prompt_extend", True)
+        self.watermark = config.get("watermark", False)
 
         # 并发控制
         self.processing_users: set[str] = set()
         self.last_operations: dict[str, float] = {}
 
-        # 复用的客户端（延迟初始化）
-        self._openai_clients: dict[str, AsyncOpenAI] = {}
+        # 复用的客户端
         self._http_session: Optional[aiohttp.ClientSession] = None
 
         # 图片目录
@@ -87,6 +93,9 @@ class GiteeAIImage(Star):
         # 清理计数器和后台任务引用
         self._generation_count: int = 0
         self._background_tasks: set[asyncio.Task] = set()
+
+        # 设置 DashScope base URL
+        dashscope.base_http_api_url = self.base_url
 
     @staticmethod
     def _parse_api_keys(api_keys) -> list[str]:
@@ -102,13 +111,13 @@ class GiteeAIImage(Star):
     def _get_image_dir(self) -> Path:
         """获取图片保存目录（延迟初始化）"""
         if self._image_dir is None:
-            base_dir = StarTools.get_data_dir("astrbot_plugin_gitee_aiimg")
+            base_dir = StarTools.get_data_dir("astrbot_plugin_aliyun_qwen_aiimg")
             self._image_dir = base_dir / "images"
             self._image_dir.mkdir(exist_ok=True)
         return self._image_dir
 
-    def _get_client(self) -> AsyncOpenAI:
-        """获取复用的 AsyncOpenAI 客户端"""
+    def _get_api_key(self) -> str:
+        """获取当前 API Key（轮询）"""
         # 重新读取配置（支持热更新）
         if not self.api_keys:
             self.api_keys = self._parse_api_keys(self.config.get("api_key", []))
@@ -119,15 +128,7 @@ class GiteeAIImage(Star):
         # 轮询获取 Key
         api_key = self.api_keys[self.current_key_index]
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-
-        # 复用客户端
-        if api_key not in self._openai_clients:
-            self._openai_clients[api_key] = AsyncOpenAI(
-                base_url=self.base_url,
-                api_key=api_key,
-            )
-
-        return self._openai_clients[api_key]
+        return api_key
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         """获取复用的 HTTP Session"""
@@ -135,7 +136,7 @@ class GiteeAIImage(Star):
             self._http_session = aiohttp.ClientSession()
         return self._http_session
 
-    def _get_save_path(self, extension: str = ".jpg") -> str:
+    def _get_save_path(self, extension: str = ".png") -> str:
         """生成唯一的图片保存路径"""
         image_dir = self._get_image_dir()
         filename = f"{int(time.time())}_{os.urandom(4).hex()}{extension}"
@@ -208,59 +209,48 @@ class GiteeAIImage(Star):
 
         return filepath
 
-    async def _save_base64_image(self, b64_data: str) -> str:
-        """异步保存 base64 图片到文件"""
-        filepath = self._get_save_path()
-        image_bytes = base64.b64decode(b64_data)
-
-        async with aiofiles.open(filepath, "wb") as f:
-            await f.write(image_bytes)
-
-        return filepath
-
     async def _generate_image(self, prompt: str, size: str = "") -> str:
-        """调用 Gitee AI API 生成图片，返回本地文件路径"""
-        client = self._get_client()
+        """调用 Aliyun Qwen API 生成图片，返回本地文件路径"""
+        api_key = self._get_api_key()
         target_size = size if size else self.default_size
 
         # 构建请求参数
-        kwargs = {
-            "prompt": prompt,
-            "model": self.model,
-            "extra_body": {
-                "num_inference_steps": self.num_inference_steps,
-            },
-        }
-
-        if self.negative_prompt:
-            kwargs["extra_body"]["negative_prompt"] = self.negative_prompt
-        if target_size:
-            kwargs["size"] = target_size
-
         try:
-            response = await client.images.generate(**kwargs)  # type: ignore
+            # 使用 DashScope SDK 调用
+            response = await asyncio.to_thread(
+                ImageSynthesis.call,
+                api_key=api_key,
+                model=self.model,
+                prompt=prompt,
+                negative_prompt=self.negative_prompt,
+                n=1,
+                size=target_size,
+                prompt_extend=self.prompt_extend,
+                watermark=self.watermark
+            )
         except Exception as e:
             error_msg = str(e)
-            if "401" in error_msg:
+            if "401" in error_msg or "InvalidApiKey" in error_msg:
                 raise Exception("API Key 无效或已过期，请检查配置。")
-            elif "429" in error_msg:
+            elif "429" in error_msg or "Throttling" in error_msg:
                 raise Exception("API 调用次数超限或并发过高，请稍后再试。")
             elif "500" in error_msg:
-                raise Exception("Gitee AI 服务器内部错误，请稍后再试。")
+                raise Exception("Aliyun 服务器内部错误，请稍后再试。")
+            elif "DataInspectionFailed" in error_msg:
+                raise Exception("输入内容触发了内容安全审核，请修改提示词后重试。")
             else:
                 raise Exception(f"API调用失败: {error_msg}")
 
-        if not response.data:  # type: ignore
+        if response.status_code != HTTPStatus.OK:
+            raise Exception(f"生成图片失败: {response.code} - {response.message}")
+
+        if not response.output.results:
             raise Exception("生成图片失败：未返回数据")
 
-        image_data = response.data[0]  # type: ignore
-
-        if image_data.url:
-            filepath = await self._download_image(image_data.url)
-        elif image_data.b64_json:
-            filepath = await self._save_base64_image(image_data.b64_json)
-        else:
-            raise Exception("生成图片失败：未返回 URL 或 Base64 数据")
+        image_url = response.output.results[0].url
+        
+        # 下载图片到本地
+        filepath = await self._download_image(image_url)
 
         # 每 N 次生成执行一次清理
         self._generation_count += 1
@@ -302,16 +292,16 @@ class GiteeAIImage(Star):
         finally:
             self.processing_users.discard(request_id)
 
-    @filter.command("aiimg")
+    @filter.command("qwenimg")
     async def generate_image_command(self, event: AstrMessageEvent, prompt: str):
         """生成图片指令
 
-        用法: /aiimg <提示词> [比例]
-        示例: /aiimg 一个女孩 9:16
-        支持比例: 1:1, 4:3, 3:4, 3:2, 2:3, 16:9, 9:16
+        用法: /qwenimg <提示词> [比例]
+        示例: /qwenimg 一个女孩 9:16
+        支持比例: 1:1, 4:3, 3:4, 16:9, 9:16
         """
         if not prompt:
-            yield event.plain_result("请提供提示词！使用方法：/aiimg <提示词> [比例]")
+            yield event.plain_result("请提供提示词！使用方法：/qwenimg <提示词> [比例]")
             return
 
         user_id = event.get_sender_id()
@@ -331,14 +321,20 @@ class GiteeAIImage(Star):
         # 解析比例参数
         ratio = "1:1"
         prompt_parts = prompt.rsplit(" ", 1)
-        if len(prompt_parts) > 1 and prompt_parts[1] in self.SUPPORTED_RATIOS:
+        if len(prompt_parts) > 1 and prompt_parts[1] in ["1:1", "4:3", "3:4", "16:9", "9:16"]:
             ratio = prompt_parts[1]
             prompt = prompt_parts[0]
 
-        # 确定目标尺寸
+        # 根据模型选择合适的尺寸
         target_size = self.default_size
-        if ratio != "1:1" or (ratio == "1:1" and self.default_size not in self.SUPPORTED_RATIOS["1:1"]):
-            target_size = self.SUPPORTED_RATIOS[ratio][0]
+        if self.model.startswith("qwen-image"):
+            # qwen-image 系列使用固定尺寸
+            if ratio in self.QWEN_IMAGE_SIZES:
+                target_size = self.QWEN_IMAGE_SIZES[ratio][0]
+        else:
+            # wan 系列使用灵活尺寸
+            if ratio in self.WAN_IMAGE_SIZES:
+                target_size = self.WAN_IMAGE_SIZES[ratio][0]
 
         try:
             image_path = await self._generate_image(prompt, size=target_size)
@@ -355,11 +351,6 @@ class GiteeAIImage(Star):
         # 关闭 HTTP Session
         if self._http_session and not self._http_session.closed:
             await self._http_session.close()
-
-        # 清理 OpenAI 客户端
-        for client in self._openai_clients.values():
-            await client.close()
-        self._openai_clients.clear()
 
     def __del__(self):
         """析构时尝试清理资源"""
