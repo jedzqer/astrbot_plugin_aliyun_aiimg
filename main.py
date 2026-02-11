@@ -17,6 +17,14 @@ import aiohttp
 from dashscope import ImageSynthesis
 import dashscope
 
+# 尝试导入新版 ImageGeneration（wan2.6 需要）
+try:
+    from dashscope.aigc.image_generation import ImageGeneration
+    from dashscope.api_entities.dashscope_response import Message
+    HAS_IMAGE_GENERATION = True
+except ImportError:
+    HAS_IMAGE_GENERATION = False
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
@@ -220,32 +228,84 @@ class AliyunQwenImage(Star):
 
         # 构建请求参数
         try:
-            # 构建参数字典，只传入有效参数
-            params = {
-                "api_key": api_key,
-                "model": self.model,
-                "prompt": prompt,
-                "n": 1,
-                "size": target_size
-            }
-            
-            # 根据模型类型设置参数
-            # 万相模型不支持 prompt_extend 和 watermark 参数
-            if self.model.startswith("qwen-image"):
-                params["prompt_extend"] = self.prompt_extend
-                params["watermark"] = self.watermark
-                # 只有在 negative_prompt 不为空时才传入
-                if self.negative_prompt and self.negative_prompt.strip():
-                    params["negative_prompt"] = self.negative_prompt
-            
-            logger.info(f"[_generate_image] 调用参数: {params}")
-            
-            # 使用 DashScope SDK 调用
-            response = await asyncio.to_thread(
-                ImageSynthesis.call,
-                **params
-            )
-            logger.info(f"[_generate_image] API 调用完成，状态码: {response.status_code}")
+            # wan2.6 模型使用新的 ImageGeneration API
+            if self.model == "wan2.6-t2i":
+                if not HAS_IMAGE_GENERATION:
+                    raise Exception("wan2.6-t2i 模型需要 DashScope SDK >= 1.25.7，请升级: pip install --upgrade dashscope")
+                
+                logger.info(f"[_generate_image] 使用 ImageGeneration API (wan2.6)")
+                
+                # 构建 Message 对象
+                message = Message(
+                    role="user",
+                    content=[{"text": prompt}]
+                )
+                
+                # 调用新版 API
+                response = await asyncio.to_thread(
+                    ImageGeneration.call,
+                    model=self.model,
+                    api_key=api_key,
+                    messages=[message],
+                    negative_prompt=self.negative_prompt if self.negative_prompt and self.negative_prompt.strip() else "",
+                    prompt_extend=self.prompt_extend,
+                    watermark=self.watermark,
+                    n=1,
+                    size=target_size
+                )
+                
+                logger.info(f"[_generate_image] API 调用完成，状态码: {response.status_code}")
+                
+                if response.status_code != HTTPStatus.OK:
+                    raise Exception(f"生成图片失败: {response.code} - {response.message}")
+                
+                if not response.output.choices:
+                    raise Exception("生成图片失败：未返回数据")
+                
+                # 从新版 API 响应中提取图片 URL
+                image_url = response.output.choices[0].message.content[0]["image"]
+                
+            else:
+                # wan2.5 及以下版本、qwen-image 系列使用旧的 ImageSynthesis API
+                logger.info(f"[_generate_image] 使用 ImageSynthesis API")
+                
+                params = {
+                    "api_key": api_key,
+                    "model": self.model,
+                    "prompt": prompt,
+                    "n": 1,
+                    "size": target_size
+                }
+                
+                # 根据模型类型设置参数
+                if self.model.startswith("qwen-image"):
+                    params["prompt_extend"] = self.prompt_extend
+                    params["watermark"] = self.watermark
+                    if self.negative_prompt and self.negative_prompt.strip():
+                        params["negative_prompt"] = self.negative_prompt
+                elif self.model.startswith("wan"):
+                    # wan2.5 及以下版本支持这些参数
+                    params["prompt_extend"] = self.prompt_extend
+                    params["watermark"] = self.watermark
+                    if self.negative_prompt and self.negative_prompt.strip():
+                        params["negative_prompt"] = self.negative_prompt
+                
+                logger.info(f"[_generate_image] 调用参数: {params}")
+                
+                response = await asyncio.to_thread(
+                    ImageSynthesis.call,
+                    **params
+                )
+                
+                logger.info(f"[_generate_image] API 调用完成，状态码: {response.status_code}")
+                
+                if response.status_code != HTTPStatus.OK:
+                    raise Exception(f"生成图片失败: {response.code} - {response.message}")
+                
+                if not response.output.results:
+                    raise Exception("生成图片失败：未返回数据")
+                
+                image_url = response.output.results[0].url
         except Exception as e:
             error_msg = str(e)
             if "401" in error_msg or "InvalidApiKey" in error_msg:
@@ -259,14 +319,6 @@ class AliyunQwenImage(Star):
             else:
                 raise Exception(f"API调用失败: {error_msg}")
 
-        if response.status_code != HTTPStatus.OK:
-            raise Exception(f"生成图片失败: {response.code} - {response.message}")
-
-        if not response.output.results:
-            raise Exception("生成图片失败：未返回数据")
-
-        image_url = response.output.results[0].url
-        
         # 下载图片到本地
         filepath = await self._download_image(image_url)
 
